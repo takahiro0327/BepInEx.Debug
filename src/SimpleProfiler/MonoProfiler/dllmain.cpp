@@ -16,6 +16,8 @@ struct MethodStats
 	uint64_t total_allocation = 0;
 	nanoseconds total_runtime = nanoseconds(0);
 	nanoseconds self_runtime = nanoseconds(0);
+
+	std::unordered_map<void*, uint64_t> parent_call_counts;
 };
 
 struct StackEntry
@@ -103,6 +105,7 @@ struct ThreadProfilerInfo
 		{
 			StackEntry& parent = stack.back();
 			parent.child_runtime += time;
+			++stats->parent_call_counts[parent.method];
 		}
 	}
 
@@ -126,6 +129,9 @@ struct ThreadProfilerInfo
 
 	static void dump()
 	{
+		std::ofstream parent_profile;
+		parent_profile.open("ParentProfile.csv", std::fstream::out | std::fstream::trunc);
+
 		std::vector<Row> rows;
 		{
 			std::lock_guard guard(all_instances_mut);
@@ -134,37 +140,51 @@ struct ThreadProfilerInfo
 				table_t thread_table(thread_info->get_table());
 				for (const auto& entry : thread_table)
 				{
+					auto method_name = mono_method_full_name(entry.first);
 					rows.push_back(Row{
 						.thread_id = thread_info->thread_id,
-						.name = mono_method_full_name(entry.first),
+						.name = method_name,
 						.count = entry.second.call_count,
 						.total_runtime = entry.second.total_runtime.count(),
 						.self_runtime = entry.second.self_runtime.count(),
 						.total_allocation = entry.second.total_allocation });
+
+					parent_profile << method_name << "," << entry.second.call_count << std::endl;
+					std::vector<std::pair<void*, uint64_t>> parent_call_counts(entry.second.parent_call_counts.begin(), entry.second.parent_call_counts.end());
+					sort(parent_call_counts.begin(), parent_call_counts.end(), [](auto& a, auto& b) { return a.second > b.second; });
+
+					for (auto count : parent_call_counts)
+					{
+						parent_profile << "\t" << mono_method_full_name(count.first) << "," << count.second << std::endl;
+					}
 				}
+					
+
 			}
 		}
 
-		std::ofstream fs;
-
-		fs.open("MonoProfilerOutput.csv", std::fstream::out | std::fstream::trunc);
-
-
-		//Sort by time
-		sort(rows.begin(), rows.end(), [=](auto& a, auto& b) {
-			return a.total_runtime > b.total_runtime;
-		});
-
-		fs << "\"Thread\",\"Call count\",\"Method name\",\"Total runtime (ns)\",\"Self runtime (ns)\",\"Total allocation (bytes)\"" << std::endl;
-
-		//Dump into csv
-		for (auto& it : rows)
 		{
-			fs << it.thread_id << "," << it.count << ",\"" << it.name << "\"," <<
-				it.total_runtime << "," << it.self_runtime << "," << it.total_allocation << std::endl;
-		}
+			std::ofstream fs;
 
-		fs.close();
+			fs.open("MonoProfilerOutput.csv", std::fstream::out | std::fstream::trunc);
+
+
+			//Sort by time
+			sort(rows.begin(), rows.end(), [=](auto& a, auto& b) {
+				return a.total_runtime > b.total_runtime;
+				});
+
+			fs << "\"Thread\",\"Call count\",\"Method name\",\"Total runtime (ns)\",\"Self runtime (ns)\",\"Total allocation (bytes)\"" << std::endl;
+
+			//Dump into csv
+			for (auto& it : rows)
+			{
+				fs << it.thread_id << "," << it.count << ",\"" << it.name << "\"," <<
+					it.total_runtime << "," << it.self_runtime << "," << it.total_allocation << std::endl;
+			}
+
+			fs.close();
+		}
 	}
 };
 
