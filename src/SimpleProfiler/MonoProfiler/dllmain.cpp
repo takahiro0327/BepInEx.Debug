@@ -14,10 +14,11 @@ struct MethodStats
 {
 	uint64_t call_count = 0;
 	uint64_t total_allocation = 0;
+	int64_t self_allocation = 0;
 	nanoseconds total_runtime = nanoseconds(0);
 	nanoseconds self_runtime = nanoseconds(0);
 
-	std::unordered_map<void*, uint64_t> parent_call_counts;
+	//std::unordered_map<void*, uint64_t> parent_call_counts;
 };
 
 struct StackEntry
@@ -25,6 +26,7 @@ struct StackEntry
 	void* method;
 	time_point<high_resolution_clock> entry_time;
 	uint64_t entry_alloc;
+	uint64_t child_alloc;
 	nanoseconds child_runtime;
 };
 
@@ -59,7 +61,7 @@ struct ThreadProfilerInfo
 
 	void enter_method(void* method)
 	{
-		stack.push_back(StackEntry{ method, high_resolution_clock::now(), mono_gc_get_used_size(), nanoseconds(0) });
+		stack.push_back(StackEntry{ method, high_resolution_clock::now(), mono_gc_get_used_size(), 0, nanoseconds(0) });
 	}
 
 	MethodStats* get_method_stats(void* method)
@@ -93,19 +95,23 @@ struct ThreadProfilerInfo
 		stats->self_runtime += time - top.child_runtime;
 		stats->call_count++;
 		uint64_t used_size = mono_gc_get_used_size();
+		uint64_t alloc_size = 0;
 		// If a GC has happened since the method was entered, our allocation
 		// estimate will be messed up. Here we use a simple heuristic:
 		// ignore any negative allocation number.
 		if (used_size > top.entry_alloc)
 		{
-			stats->total_allocation += used_size - top.entry_alloc;
+			alloc_size = used_size - top.entry_alloc;
+			stats->total_allocation += alloc_size;
+			stats->self_allocation += alloc_size - top.child_alloc;
 		}
 
 		if (!stack.empty())
 		{
 			StackEntry& parent = stack.back();
 			parent.child_runtime += time;
-			++stats->parent_call_counts[parent.method];
+			parent.child_alloc += alloc_size;
+			//++stats->parent_call_counts[parent.method];
 		}
 	}
 
@@ -125,12 +131,13 @@ struct ThreadProfilerInfo
 		int64_t total_runtime;
 		int64_t self_runtime;
 		uint64_t total_allocation;
+		int64_t self_allocation;
 	};
 
 	static void dump()
 	{
-		std::ofstream parent_profile;
-		parent_profile.open("ParentProfile.csv", std::fstream::out | std::fstream::trunc);
+		//std::ofstream parent_profile;
+		//parent_profile.open("ParentProfile.csv", std::fstream::out | std::fstream::trunc);
 
 		std::vector<Row> rows;
 		{
@@ -147,8 +154,11 @@ struct ThreadProfilerInfo
 						.count = entry.second.call_count,
 						.total_runtime = entry.second.total_runtime.count(),
 						.self_runtime = entry.second.self_runtime.count(),
-						.total_allocation = entry.second.total_allocation });
+						.total_allocation = entry.second.total_allocation,
+						.self_allocation = entry.second.self_allocation
+						});
 
+#if false
 					parent_profile << method_name << "," << entry.second.call_count << std::endl;
 					std::vector<std::pair<void*, uint64_t>> parent_call_counts(entry.second.parent_call_counts.begin(), entry.second.parent_call_counts.end());
 					sort(parent_call_counts.begin(), parent_call_counts.end(), [](auto& a, auto& b) { return a.second > b.second; });
@@ -157,6 +167,7 @@ struct ThreadProfilerInfo
 					{
 						parent_profile << "\t" << mono_method_full_name(count.first) << "," << count.second << std::endl;
 					}
+#endif
 				}
 					
 
@@ -174,13 +185,13 @@ struct ThreadProfilerInfo
 				return a.total_runtime > b.total_runtime;
 				});
 
-			fs << "\"Thread\",\"Call count\",\"Method name\",\"Total runtime (ns)\",\"Self runtime (ns)\",\"Total allocation (bytes)\"" << std::endl;
+			fs << "\"Thread\",\"Call count\",\"Method name\",\"Total runtime (ns)\",\"Self runtime (ns)\",\"Total allocation (bytes)\",\"Self allocation (bytes)\"" << std::endl;
 
 			//Dump into csv
 			for (auto& it : rows)
 			{
 				fs << it.thread_id << "," << it.count << ",\"" << it.name << "\"," <<
-					it.total_runtime << "," << it.self_runtime << "," << it.total_allocation << std::endl;
+					(it.total_runtime/1000000.0) << "," << (it.self_runtime / 1000000.0) << "," << (it.total_allocation / 1048576.0) << "," << (it.self_allocation/ 1048576.0) << std::endl;
 			}
 
 			fs.close();
